@@ -881,7 +881,7 @@ def main():
     root = tk.Tk()
     root.title("COCO Viewer")
 
-    annotations_file = 'data/task_169/yolo_pred.json'
+    annotations_file = 'data/coco_yolo.json'
     data = Data(annotations_file=annotations_file)
     statusbar = StatusBar(root)
     sliders = SlidersBar(root)

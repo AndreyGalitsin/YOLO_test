@@ -29,6 +29,7 @@ from tqdm import tqdm
 
 from segment_anything import sam_model_registry, SamPredictor
 import clip
+import matplotlib.pyplot as plt
 
 
 def load_coco_boxes(json_path: Path) -> Dict[str, List[List[int]]]:
@@ -53,7 +54,7 @@ def create_free_mask(img_shape: Tuple[int, int], boxes: List[List[int]]) -> np.n
     for x1, y1, x2, y2 in boxes:
         cv2.rectangle(mask, (x1, y1), (x2, y2), 0, -1)  # 0 = occupied
     # dilate a bit to close gaps between bbox of same object
-    mask = cv2.dilate(mask, np.ones((5, 5), np.uint8))
+    # mask = cv2.dilate(mask, np.ones((5, 5), np.uint8))
     return mask
 
 
@@ -69,7 +70,7 @@ def connected_components(mask: np.ndarray, min_area: int = 3000) -> List[List[in
 
 
 def main(images_folder_path, yolo_pred, gallery_dir, out_pseudo, out_active,
-         high_tau: float = 0.28, low_tau: float = 0.22):
+         high_tau: float = 0.8, low_tau: float = 0.5):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}")
@@ -78,7 +79,7 @@ def main(images_folder_path, yolo_pred, gallery_dir, out_pseudo, out_active,
     yolo_boxes = load_coco_boxes(Path(yolo_pred))
 
     # 2. load SAM‑B model
-    sam = sam_model_registry["vit_b"](checkpoint="checkpoint/sam_vit_b_01ec64.pth")
+    sam = sam_model_registry["vit_b"](checkpoint="checkpoints/sam_vit_b_01ec64.pth")
     sam.to(device)
     predictor = SamPredictor(sam)
 
@@ -88,14 +89,14 @@ def main(images_folder_path, yolo_pred, gallery_dir, out_pseudo, out_active,
 
     # 4. precompute gallery embeddings
     gallery_embeddings, gallery_names = [], []
-    for img_path in sorted(Path(gallery_dir).glob("*.jpg")):
-        class_name = img_path.stem  # full stem is class
+    for img_path in sorted(Path(gallery_dir).glob("*/*.jpg")):
+        class_name = str(img_path.parent.name)
         im = Image.open(img_path).convert("RGB")
         emb = clip_model.encode_image(clip_preprocess(im).unsqueeze(0).to(device))
         gallery_embeddings.append(emb.squeeze(0).cpu())
         gallery_names.append(class_name)
     gallery_matrix = F.normalize(torch.stack(gallery_embeddings), dim=-1)
-    print(f"Loaded {len(gallery_names)} reference classes from gallery_dir")
+    print(f"Loaded {len(gallery_names)} reference images from gallery_dir")
 
     pseudo_annotations = []
     active_rows = []
@@ -106,7 +107,9 @@ def main(images_folder_path, yolo_pred, gallery_dir, out_pseudo, out_active,
         H, W = im_bgr.shape[:2]
 
         # free mask
-        mask_free = create_free_mask((H, W), yolo_boxes.get(img_path.name, []))
+        boxes = yolo_boxes.get(str(img_path))
+        boxes = []
+        mask_free = create_free_mask((H, W), boxes)
 
         # connected free regions → proposals
         props = connected_components(mask_free)
@@ -117,48 +120,114 @@ def main(images_folder_path, yolo_pred, gallery_dir, out_pseudo, out_active,
         predictor.set_image(cv2.cvtColor(im_bgr, cv2.COLOR_BGR2RGB))
 
         for (x1, y1, x2, y2) in props:
-            # convert to SAM box format (x1,y1,x2,y2) float32
             sam_box = np.array([x1, y1, x2, y2], dtype=np.float32)
             masks, _, _ = predictor.predict(box=sam_box[None, :], multimask_output=False)
             mask = masks[0].astype(np.uint8)
-            # if mask mostly empty skip
-            if mask.sum() < 500:  # pixels
+            # фильтр: крупные маски
+            if mask.sum() / (H * W) > 0.40:
                 continue
-            # bbox of mask for tighter crop
-            ys, xs = np.where(mask > 0)
-            if len(xs) == 0:
-                continue
-            bx1, by1, bx2, by2 = xs.min(), ys.min(), xs.max(), ys.max()
-            pad = 4
-            bx1 = max(bx1 - pad, 0); by1 = max(by1 - pad, 0)
-            bx2 = min(bx2 + pad, W - 1); by2 = min(by2 + pad, H - 1)
-            crop = im_bgr[by1:by2 + 1, bx1:bx2 + 1]
-            crop_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            # CLIP embedding
-            with torch.no_grad():
-                emb = clip_model.encode_image(clip_preprocess(crop_pil).unsqueeze(0).to(device))
-            emb = F.normalize(emb, dim=-1).cpu().squeeze(0)
-            # similarity to gallery
-            cos_sim = torch.matmul(gallery_matrix, emb).numpy()  # shape [K]
-            best_idx = int(cos_sim.argmax())
-            best_sim = float(cos_sim[best_idx])
-            best_class = gallery_names[best_idx]
 
-            if best_sim >= high_tau:
-                pseudo_annotations.append({
-                    "file_name": img_path.name,
-                    "bbox": [int(bx1), int(by1), int(bx2 - bx1), int(by2 - by1)],
-                    "class": best_class,
-                    "confidence_clip": best_sim,
-                })
-            elif best_sim >= low_tau:
-                active_rows.append({
-                    "file_name": img_path.name,
-                    "x1": bx1, "y1": by1, "x2": bx2, "y2": by2,
-                    "top_class": best_class,
-                    "similarity": best_sim,
-                })
-            # else discard (likely background)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            vis = im_bgr.copy()
+            cv2.drawContours(vis, contours, -1, (0, 255, 0), 2)
+            plt.figure(figsize=(10, 10))
+            plt.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+            plt.title(f"mask contours: {img_path.name}")
+            plt.axis("off")
+            plt.show()
+
+            for cnt in contours:
+                cx, cy, cw, ch = cv2.boundingRect(cnt)
+                if cw * ch < 1500:
+                    continue
+
+                bx1, by1, bx2, by2 = cx, cy, cx + cw, cy + ch
+                pad = 4
+                bx1 = max(bx1 - pad, 0)
+                by1 = max(by1 - pad, 0)
+                bx2 = min(bx2 + pad, W - 1)
+                by2 = min(by2 + pad, H - 1)
+
+                crop = im_bgr[by1:by2 + 1, bx1:bx2 + 1]
+                crop_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+
+                # CLIP embedding
+                with torch.no_grad():
+                    emb = clip_model.encode_image(clip_preprocess(crop_pil).unsqueeze(0).to(device))
+                emb = F.normalize(emb, dim=-1).cpu().squeeze(0)
+
+                # similarity to gallery
+                cos_sim = torch.matmul(gallery_matrix, emb).detach().numpy()
+                best_idx = int(cos_sim.argmax())
+                best_sim = float(cos_sim[best_idx])
+                best_class = gallery_names[best_idx]
+
+                plt.figure(figsize=(3, 3))
+                plt.imshow(crop_pil)
+                plt.title(f"{best_class}\n{best_sim:.2f}")
+                plt.axis("off")
+                plt.show()
+
+                if best_sim >= high_tau:
+                    pseudo_annotations.append({
+                        "file_name": str(img_path),
+                        "bbox": [int(bx1), int(by1), int(bx2 - bx1), int(by2 - by1)],
+                        "class": best_class,
+                        "confidence_clip": best_sim,
+                    })
+                elif best_sim >= low_tau:
+                    active_rows.append({
+                        "file_name": str(img_path),
+                        "x1": bx1, "y1": by1, "x2": bx2, "y2": by2,
+                        "top_class": best_class,
+                        "similarity": best_sim,
+                    })
+
+
+
+
+            # # convert to SAM box format (x1,y1,x2,y2) float32
+            # sam_box = np.array([x1, y1, x2, y2], dtype=np.float32)
+            # masks, _, _ = predictor.predict(box=sam_box[None, :], multimask_output=False)
+            # mask = masks[0].astype(np.uint8)
+            # # if mask mostly empty skip
+            # if mask.sum() < 500:  # pixels
+            #     continue
+            # # bbox of mask for tighter crop
+            # ys, xs = np.where(mask > 0)
+            # if len(xs) == 0:
+            #     continue
+            # bx1, by1, bx2, by2 = xs.min(), ys.min(), xs.max(), ys.max()
+            # pad = 4
+            # bx1 = max(bx1 - pad, 0); by1 = max(by1 - pad, 0)
+            # bx2 = min(bx2 + pad, W - 1); by2 = min(by2 + pad, H - 1)
+            # crop = im_bgr[by1:by2 + 1, bx1:bx2 + 1]
+            # crop_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            # # CLIP embedding
+            # with torch.no_grad():
+            #     emb = clip_model.encode_image(clip_preprocess(crop_pil).unsqueeze(0).to(device))
+            # emb = F.normalize(emb, dim=-1).cpu().squeeze(0)
+            # # similarity to gallery
+            # cos_sim = torch.matmul(gallery_matrix, emb).detach().numpy()
+            # best_idx = int(cos_sim.argmax())
+            # best_sim = float(cos_sim[best_idx])
+            # best_class = gallery_names[best_idx]
+            #
+            # if best_sim >= high_tau:
+            #     pseudo_annotations.append({
+            #         "file_name": str(img_path),
+            #         "bbox": [int(bx1), int(by1), int(bx2 - bx1), int(by2 - by1)],
+            #         "class": best_class,
+            #         "confidence_clip": best_sim,
+            #     })
+            # elif best_sim >= low_tau:
+            #     active_rows.append({
+            #         "file_name": str(img_path),
+            #         "x1": bx1, "y1": by1, "x2": bx2, "y2": by2,
+            #         "top_class": best_class,
+            #         "similarity": best_sim,
+            #     })
+
 
     # save outputs
     with open(Path(out_pseudo), "w") as f:

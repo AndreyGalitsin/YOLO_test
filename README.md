@@ -115,7 +115,7 @@ wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 python run_inference.py
 ```
 ### Step 2:
-
+Добавим 
 ```bash
 python proposal_clip_matching.py
 ```

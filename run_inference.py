@@ -66,4 +66,4 @@ def main(images_folder_path, out_json="data/task_169/yolo_pred.json", conf_th=0.
     print(f"Saved {ann_id-1} detections → {out_json}, nof_images {img_id+1}")
 
 if __name__ == "__main__":
-    main(images_folder_path='data/task_169')
+    main(images_folder_path='data/task_169', conf_th=0.25)

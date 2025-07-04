@@ -17,6 +17,7 @@
 *.json
 *.env
 .pytest_cache
+*.pkl
 __pycache__/
 
 
