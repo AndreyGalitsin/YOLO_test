@@ -1,4 +1,5 @@
 import json
+import os
 import pickle
 import uuid
 from collections import defaultdict
@@ -21,11 +22,16 @@ from sample_anything import SampleAnything
 
 
 class SelfLabeling:
-    def __init__(self, emb_backbone="dinov2"):
+    def __init__(self, emb_backbone="dinov2",
+                 yolo_th=0.85,
+                 cos_sim_trust_th=0.85,
+                 cos_sim_check_th=0.7):
+        self.cos_sim_trust_th = cos_sim_trust_th
+        self.cos_sim_check_th = cos_sim_check_th
         self.backbone = emb_backbone
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.sa = SampleAnything()
-        self.yd = YOLODetection(conf_th=0.8)
+        self.yd = YOLODetection(conf_th=yolo_th)
 
         if self.backbone == "clip":
             self.emb_model, _, self.preprocess = open_clip.create_model_and_transforms(
@@ -40,7 +46,6 @@ class SelfLabeling:
         else:
             raise ValueError("Unsupported backbone. Choose 'clip' or 'dinov2'")
 
-        # Augmentations
         self.augment = transforms.Compose([
             transforms.RandomApply([
                 transforms.ColorJitter(0.2, 0.2, 0.2, 0.1),
@@ -160,7 +165,8 @@ class SelfLabeling:
             best_class, best_score, class_scores = self.compare(crop_bgr, embedding_matrix)
             #print(f'class_scores {class_scores}')
 
-            if best_score > 0.7:
+
+            if best_score > self.cos_sim_check_th:
                 if categories:
                     category_id = [item['id'] for item in categories if item['name'] == best_class][0]
                 else:
@@ -177,7 +183,7 @@ class SelfLabeling:
                     "confidence": float(best_score),
                     "comment": 'few_shot_detection'
                 }
-                if best_score > 0.85:
+                if best_score > self.cos_sim_trust_th:
                     annotations.append(ann)
                 else:
                     annotations_to_check.append(ann)
@@ -250,12 +256,16 @@ class SelfLabeling:
 
         return coco, coco_to_check
 
-def main(images_folder_path='data/test',
-         coco_annotation_json='data/test/final_coco_annotation.json',
-         coco_yolo_annotation_json='data/test/coco_yolo_annotation.json',
-         coco_to_check_annotation_json='data/test/coco_to_check_annotation.json'):
+def main(images_folder_path, yolo_th, cos_sim_trust_th, cos_sim_check_th):
 
-    sl = SelfLabeling(emb_backbone='dinov2')
+    coco_annotation_json = os.path.join(images_folder_path, 'final_coco_annotation.json')
+    coco_yolo_annotation_json = os.path.join(images_folder_path, 'coco_yolo_annotation.json')
+    coco_to_check_annotation_json = os.path.join(images_folder_path, 'coco_to_check_annotation.json')
+
+    sl = SelfLabeling(emb_backbone='dinov2',
+                      yolo_th=yolo_th,
+                      cos_sim_trust_th=cos_sim_trust_th,
+                      cos_sim_check_th=cos_sim_check_th)
     embedding_matrix = sl.create_embedding_matrix(data_dir=Path('data/new_classes'))
 
     if Path(coco_yolo_annotation_json).is_file():
@@ -273,4 +283,7 @@ def main(images_folder_path='data/test',
 
 
 if __name__ == "__main__":
-    main()
+    main(images_folder_path='data/task_169',
+         yolo_th=0.8,
+         cos_sim_trust_th=0.8,
+         cos_sim_check_th=0.68)

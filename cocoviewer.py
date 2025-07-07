@@ -891,6 +891,6 @@ def main(annotations_file):
 
 
 if __name__ == "__main__":
-    # coco = 'data/test/final_coco_annotation.json'
-    coco = 'data/test/coco_to_check_annotation.json'
+    # coco = 'data/task_169/final_coco_annotation.json'
+    coco = 'data/task_169/coco_to_check_annotation.json'
     main(annotations_file=coco)
