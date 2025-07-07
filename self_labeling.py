@@ -1,29 +1,31 @@
+import json
+import pickle
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-import torch
-import open_clip
 import cv2
 from PIL import Image
 from matplotlib import pyplot as plt
 from tqdm import tqdm
-import pickle
 
-from sample_anything import SampleAnything
+import torch
+import open_clip
 import torch.nn.functional as F
 from transformers import AutoImageProcessor, Dinov2Model
 from torchvision import transforms
 
 from yolo_detection import YOLODetection
+from sample_anything import SampleAnything
 
 
 class SelfLabeling:
-    def __init__(self, emb_backbone="clip"):
+    def __init__(self, emb_backbone="dinov2"):
         self.backbone = emb_backbone
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.sa = SampleAnything()
-        self.yd = YOLODetection()
+        self.yd = YOLODetection(conf_th=0.8)
 
         if self.backbone == "clip":
             self.emb_model, _, self.preprocess = open_clip.create_model_and_transforms(
@@ -68,7 +70,7 @@ class SelfLabeling:
         embedding = F.normalize(embedding, dim=-1)
         return embedding.squeeze(0)
 
-    def create_embedding_matrix(self, data_dir: Path, pkl_path: Path=Path('data/embedding_matrix.pkl')) -> dict[str, torch.Tensor]:
+    def create_embedding_matrix(self, data_dir: Path, pkl_path: Path=Path('data/new_classes/embedding_matrix.pkl')) -> dict[str, torch.Tensor]:
         if pkl_path.exists():
             with open(pkl_path, "rb") as f:
                 print('embedding_matrix загружена из pkl')
@@ -81,7 +83,7 @@ class SelfLabeling:
 
             masks = self.sa.inference(img_bgr)
             max_area_mask = self.sa.get_max_area_mask(masks)
-            crops = self.sa.get_masked_crops(img_bgr, [max_area_mask])
+            crops, _, _ = self.sa.get_masked_crops(img_bgr, [max_area_mask])
             assert len(crops) == 1
             crop_bgr = crops[0]
 
@@ -128,51 +130,147 @@ class SelfLabeling:
 
         return best_class, best_score, class_scores
 
-    def inference(self, img_bgr, embedding_matrix, img_id=1):
-        annotations = self.yd.inference(img_bgr=img_bgr, img_id=img_id)
-        for ann in annotations:
+    def inference(self, img_bgr, embedding_matrix, img_id=1, categories=None, img_yolo_annotation=None):
+        annotations = []
+        annotations_to_check = []
+        if not img_yolo_annotation:
+            img_yolo_annotation = self.yd.inference(img_bgr=img_bgr, img_id=img_id)
+
+        annotations += img_yolo_annotation
+
+        for ann in img_yolo_annotation:
             if ann['category_name'] != 'Gripper':
                 x, y, w, h = ann['bbox']
                 x1, y1 = int(x), int(y)
                 x2, y2 = int(x + w), int(y + h)
                 img_bgr[y1:y2, x1:x2] = 0
 
-        plt.figure(figsize=(5, 5))
-        plt.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-        plt.axis("off")
-        plt.title(f"img_bgr")
-        plt.show()
+        # plt.figure(figsize=(5, 5))
+        # plt.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+        # plt.axis("off")
+        # plt.title(f"img_bgr")
+        # plt.show()
 
         masks = self.sa.inference(img_bgr)
-        self.sa.visualization_polygon(img_bgr, masks)
-        crops = self.sa.get_masked_crops(img_bgr, masks)
-        for crop_bgr in crops:
+        #self.sa.visualization_polygon(img_bgr, masks)
+        crops, coco_bboxes, coco_areas = self.sa.get_masked_crops(img_bgr, masks)
+
+
+        for crop_bgr, coco_bbox, coco_area in zip(crops, coco_bboxes, coco_areas):
             best_class, best_score, class_scores = self.compare(crop_bgr, embedding_matrix)
-            print(f'class_scores {class_scores}')
-            plt.figure(figsize=(5, 5))
-            plt.imshow(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
-            plt.axis("off")
-            plt.title(f"best_class {best_class}, best_score {best_score}")
-            plt.show()
+            #print(f'class_scores {class_scores}')
 
-    def main(self, images_folder_path):
-        yolo_categories = [{"id": key, "name": self.yolo_model.names[key]} for key in self.yolo_model.names]
-        next_category_id = max(self.yolo_model.names.keys()) + 1
-        additional_categories = [{"id": next_category_id+i, "name": cat_name} for i, cat_name in enumerate(self.reference_embeddings.keys())]
+            if best_score > 0.7:
+                if categories:
+                    category_id = [item['id'] for item in categories if item['name'] == best_class][0]
+                else:
+                    category_id = None
+
+                ann = {
+                    "id": str(uuid.uuid4()),
+                    "image_id": img_id,
+                    "category_id": category_id,
+                    "category_name": best_class,
+                    "bbox": coco_bbox,
+                    "area": coco_area,
+                    "iscrowd": 0,
+                    "confidence": float(best_score),
+                    "comment": 'few_shot_detection'
+                }
+                if best_score > 0.85:
+                    annotations.append(ann)
+                else:
+                    annotations_to_check.append(ann)
+
+            # plt.figure(figsize=(5, 5))
+            # plt.imshow(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+            # plt.axis("off")
+            # plt.title(f"best_class {best_class}, best_score {best_score}")
+            # plt.show()
+
+        return annotations, annotations_to_check
+
+    def coco_yolo_exists(self, coco_yolo_json, embedding_matrix):
+        print(f'Подгружен файл с coco аннотацией {coco_yolo_json}')
+        with open(Path(coco_yolo_json), 'r', encoding='utf-8') as f:
+            coco_yolo = json.load(f)
+            yolo_categories = coco_yolo['categories']
+
+        additional_categories = [{"id": len(yolo_categories)+i, "name": cat_name} for i, cat_name in enumerate(embedding_matrix.keys())]
+        total_categories = yolo_categories + additional_categories
+        coco = coco_yolo.copy()
+        coco['categories'] = total_categories
+
+        coco_to_check = coco.copy()
+        coco_to_check['annotations'] = []
+
+        images = coco['images']
+        for image in tqdm(images):
+            img_path = image['file_name']
+            img_id = image['id']
+            img_yolo_annotation = [item for item in coco['annotations'] if item['image_id'] == img_id]
+            img_bgr = cv2.imread(img_path)
 
 
-def demo():
-    backbones = ["clip", 'dinov2']
+            upd_img_annotations, annotations_to_check = self.inference(img_bgr=img_bgr,
+                                       embedding_matrix=embedding_matrix,
+                                       img_id=img_id,
+                                       categories=total_categories,
+                                       img_yolo_annotation=img_yolo_annotation)
 
-    sl = SelfLabeling(emb_backbone=backbones[1])
+            coco["annotations"] = [item for item in coco["annotations"] if item['image_id'] != img_id] + upd_img_annotations
+            coco_to_check['annotations'] += annotations_to_check
+        return coco, coco_to_check
+
+
+    def coco_yolo_not_exist(self, images_folder_path, yolo_categories, embedding_matrix):
+        additional_categories = [{"id": len(yolo_categories) + i, "name": cat_name} for i, cat_name in
+                                 enumerate(embedding_matrix.keys())]
+        total_categories = yolo_categories + additional_categories
+        coco = {"images": [], "annotations": [], "categories": total_categories}
+
+        coco_to_check = coco.copy()
+        coco_to_check['annotations'] = []
+
+        img_id = 0
+        for img_path in tqdm(sorted(Path(images_folder_path).glob("*/*.jpg"))):
+            img_id += 1
+            img_bgr = cv2.imread(str(img_path))
+            h, w = img_bgr.shape[:2]
+
+            upd_img_annotations, annotations_to_check = self.inference(img_bgr=img_bgr,
+                                               embedding_matrix=embedding_matrix,
+                                               img_id=img_id,
+                                               categories=total_categories)
+
+
+            coco["images"].append({"id": img_id, "file_name": str(img_path), "width": w, "height": h})
+            coco["annotations"] += upd_img_annotations
+            coco_to_check['annotations'] += annotations_to_check
+
+        return coco, coco_to_check
+
+def main(images_folder_path='data/test',
+         coco_annotation_json='data/test/final_coco_annotation.json',
+         coco_yolo_annotation_json='data/test/coco_yolo_annotation.json',
+         coco_to_check_annotation_json='data/test/coco_to_check_annotation.json'):
+
+    sl = SelfLabeling(emb_backbone='dinov2')
     embedding_matrix = sl.create_embedding_matrix(data_dir=Path('data/new_classes'))
-    img_path = 'data/task_169/variation_613/task_169--variation_613--episode_113401--camera_1--middle--samokat_grapefruit_juice.jpg'
-    # img_path = "/home/andrey/Andrey_projects/YOLO_test/data/task_169/variation_622/task_169--variation_622--episode_103470--camera_2--middle--lay's_crab.jpg"
-    # img_path = '/home/andrey/Andrey_projects/YOLO_test/data/task_169/variation_629/task_169--variation_629--episode_95667--camera_2--middle--samokat_buckwheat_flakes.jpg'
-    img_path = '/home/andrey/Andrey_projects/YOLO_test/data/task_169/variation_624/task_169--variation_624--episode_87482--camera_3--middle--samokat_sunflower_seed_oil.jpg'
-    img_bgr = cv2.imread(img_path)
-    sl.inference(img_bgr, embedding_matrix)
+
+    if Path(coco_yolo_annotation_json).is_file():
+        coco, coco_to_check = sl.coco_yolo_exists(coco_yolo_annotation_json, embedding_matrix)
+
+    else:
+        yolo_categories = sl.yd.get_yolo_categories()
+        coco, coco_to_check = sl.coco_yolo_not_exist(images_folder_path, yolo_categories, embedding_matrix)
+
+    with open(coco_annotation_json, "w") as f:
+        json.dump(coco, f, indent=2)
+
+    with open(coco_to_check_annotation_json, "w") as f:
+        json.dump(coco_to_check, f, indent=2)
 
 
 if __name__ == "__main__":
-    demo()
+    main()

@@ -876,12 +876,10 @@ def print_info(message: str):
     logging.info(message)
 
 
-def main():
+def main(annotations_file):
     print_info("Starting...")
     root = tk.Tk()
     root.title("COCO Viewer")
-
-    annotations_file = 'data/coco_yolo.json'
     data = Data(annotations_file=annotations_file)
     statusbar = StatusBar(root)
     sliders = SlidersBar(root)
@@ -893,4 +891,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # coco = 'data/test/final_coco_annotation.json'
+    coco = 'data/test/coco_to_check_annotation.json'
+    main(annotations_file=coco)

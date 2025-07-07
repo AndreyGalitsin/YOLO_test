@@ -1,5 +1,26 @@
 # YOLO test
 
+## Задача
+- Есть модель YOLO, обученная на n из N целевых классов.
+- Есть датасет с размеченными данными для n классов
+- Необходимо разработать систему полуавтоматичесой разметки, которая позволит находить и размечать недостающие классы на изображениях, на которых модель не обучалась
+
+## Пайплайн
+1. Для недостающих классов готовим набор изображений (5-6 шт)
+2. Готовим embedding matrix для этих объектов 
+3. Прогоняем все изображения из датасета через обученную модель yolo с порогом 0.85 и находим уверенные классы, которые модель умеет размечать / подгружаем файл с существующей разметкой в coco аннотации 
+4. Маскируем найденные bbox (зануляем пиксели)
+5. Маскированные изображения прогоняем через fastSAM и определяем bbox каких-то иных объектов, которые присутствуют на изображении 
+6. Для каждого найденного bbox в fastSAM делаем embedding 
+7. Сравниваем его через cosin sim с embedding matrix 
+8. Если значение сравнения больше 0.85, добавляем объект в разметку 
+9. Если значение 0.7-0.85, добавляем объект в список, который нужно отдать на проверку человеку 
+10. Человек через Label Studio проходится по этим изображением, размечает их вручную и данные добавляются в разметку 
+
+PS.: Для разметки используется coco аннотация
+
+Краткий анализ тестового датасета и инференса обученной модели:
+
 | № | Классы | YOLO обучена на классе | Класс есть в датасете | Класс хорошо распознаётся моделью | Комментарий                                                 |
 |---|--------|------------------------|-----------------------------------|-----------------------------------|-------------------------------------------------------------|
 | 1 | Alenka milk chocolate | ✅ |  ❌  | -                                 |                                                             |
@@ -96,33 +117,8 @@
 ## Installations:
 
 ```bash
-conda create -n yolo_11 python=3.11
-conda activate yolo_11
-pip install opencv-python
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-pip install pandas
-pip install requests
-pip install seaborn
-pip install "ultralytics>=8.2,<9.0"
-pip install git+https://github.com/openai/CLIP.git
 
-wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 ```
 
-## Pipeline:
-### Step 1:
-```bash
-python run_inference.py
-```
-### Step 2:
-Добавим 
-```bash
-python proposal_clip_matching.py
-```
 
-## Used links
-### SAM - segment anything model 
-https://github.com/facebookresearch/segment-anything
 
-### CLIP (Contrastive Language-Image Pre-Training)
-https://github.com/openai/CLIP/tree/main

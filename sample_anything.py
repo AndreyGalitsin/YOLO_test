@@ -48,6 +48,8 @@ class SampleAnything:
 
     def get_masked_crops(self, img_bgr, masks):
         crops = []
+        coco_bboxes = []
+        coco_areas = []
         for m in masks:
             mask = m["mask"]
             bbox = self.get_bbox_from_mask(mask)
@@ -62,7 +64,11 @@ class SampleAnything:
             masked = cv2.bitwise_and(crop_img, crop_mask * 255)
             crops.append(masked)
 
-        return crops
+            w, h = x2 - x1 + 1, y2 - y1 + 1
+            coco_bboxes.append([int(x1), int(y1), int(w), int(h)])
+            coco_areas.append(float(w * h))
+
+        return crops, coco_bboxes, coco_areas
 
     @staticmethod
     def get_max_area_mask(masks):
@@ -87,7 +93,8 @@ class SampleAnything:
             device=self.device,
             conf=0.4,
             iou=0.9,
-            retina_masks=True
+            retina_masks=True,
+            verbose=False
         )
         r = results[0].cpu()
 
