@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""COCO Dataset Viewer.
+# This file includes code adapted from coco-viewer by Taras Savchyn
+# https://github.com/trsvchn/coco-viewer
+# Licensed under the MIT License
 
-View images with bboxes from the COCO dataset.
-"""
+
 import argparse
 import colorsys
 import json

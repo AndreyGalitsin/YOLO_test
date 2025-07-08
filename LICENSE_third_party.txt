@@ -1,3 +1,11 @@
+This project includes code derived from:
+
+Repository: https://github.com/trsvchn/coco-viewer
+Author: Taras Savchyn
+License: MIT License
+
+---
+
 MIT License
 
 Copyright (c) 2019 Taras Savchyn
